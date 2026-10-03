@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>DevOps Task App</title>
+
+    <link rel="stylesheet" href="style.css" />
+  </head>
+
+  <body>
+    <div class="container">
+      <header>
+        <div>
+          <h1>DevOps Tasks</h1>
+          <p>Simple application for our Kubernetes lab</p>
+        </div>
+
+        <div id="api-status" class="status status-loading">Checking API...</div>
+      </header>
+
+      <section class="create-task">
+        <form id="task-form">
+          <input
+            id="task-title"
+            type="text"
+            placeholder="Enter a task..."
+            autocomplete="off"
+          />
+
+          <button type="submit">Add Task</button>
+        </form>
+      </section>
+
+      <section>
+        <div class="section-header">
+          <h2>Tasks</h2>
+
+          <button id="refresh-button" class="secondary-button">Refresh</button>
+        </div>
+
+        <div id="loading">Loading tasks...</div>
+
+        <div id="empty-state" class="hidden">No tasks yet.</div>
+
+        <div id="tasks"></div>
+      </section>
+
+      <div id="error-message" class="error hidden"></div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+spec:
+  selector:
+    matchLabels:
+      app: task-api
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: task-api
+    spec:
+      containers:
+        - name: task-api
+          image: task-api:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
