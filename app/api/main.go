@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
-	"sync"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Task struct {
@@ -34,29 +37,73 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-var (
-	tasks = make(map[string]Task)
-	mu    sync.RWMutex
-)
+var db *pgxpool.Pool
 
 func main() {
+	db = connectDB()
+	defer db.Close()
+
 	fmt.Println("API starting on port 8080...")
 
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/ready", readyHandler)
 
-	// Collection:
-	// GET  /api/tasks
-	// POST /api/tasks
 	http.HandleFunc("/api/tasks", apiTasksHandler)
-
-	// Individual task:
-	// GET    /api/tasks/{id}
-	// PUT    /api/tasks/{id}
-	// DELETE /api/tasks/{id}
 	http.HandleFunc("/api/tasks/", apiTaskByIDHandler)
 
 	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+// ----------------------------------------------------
+// DATABASE
+// ----------------------------------------------------
+
+func connectDB() *pgxpool.Pool {
+	dbHost := os.Getenv("DB_HOST")
+	dbPort := os.Getenv("DB_PORT")
+	dbName := os.Getenv("DB_NAME")
+	dbUser := os.Getenv("DB_USER")
+	dbPassword := os.Getenv("DB_PASSWORD")
+
+	databaseURL := fmt.Sprintf(
+		"postgres://%s:%s@%s:%s/%s",
+		dbUser,
+		dbPassword,
+		dbHost,
+		dbPort,
+		dbName,
+	)
+
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		log.Fatalf(
+			"unable to parse database config: %v",
+			err,
+		)
+	}
+
+	pool, err := pgxpool.NewWithConfig(
+		context.Background(),
+		config,
+	)
+	if err != nil {
+		log.Fatalf(
+			"unable to create database pool: %v",
+			err,
+		)
+	}
+
+	err = pool.Ping(context.Background())
+	if err != nil {
+		log.Fatalf(
+			"unable to connect to database: %v",
+			err,
+		)
+	}
+
+	log.Println("Connected to PostgreSQL")
+
+	return pool
 }
 
 // ----------------------------------------------------
@@ -121,7 +168,7 @@ func writeError(
 }
 
 // ----------------------------------------------------
-// Health
+// HEALTH
 // ----------------------------------------------------
 
 func healthHandler(
@@ -154,7 +201,7 @@ func healthHandler(
 }
 
 // ----------------------------------------------------
-// Ready
+// READY
 // ----------------------------------------------------
 
 func readyHandler(
@@ -173,6 +220,18 @@ func readyHandler(
 			w,
 			http.StatusMethodNotAllowed,
 			"method not allowed",
+		)
+		return
+	}
+
+	err := db.Ping(r.Context())
+	if err != nil {
+		writeJSON(
+			w,
+			http.StatusServiceUnavailable,
+			HealthResponse{
+				Status: "not ready",
+			},
 		)
 		return
 	}
@@ -202,9 +261,8 @@ func apiTasksHandler(
 	}
 
 	switch r.Method {
-
 	case http.MethodGet:
-		getTasks(w)
+		getTasks(w, r)
 
 	case http.MethodPost:
 		createTask(w, r)
@@ -250,15 +308,14 @@ func apiTaskByIDHandler(
 	}
 
 	switch r.Method {
-
 	case http.MethodGet:
-		getTask(w, id)
+		getTask(w, r, id)
 
 	case http.MethodPut:
 		updateTask(w, r, id)
 
 	case http.MethodDelete:
-		deleteTask(w, id)
+		deleteTask(w, r, id)
 
 	default:
 		writeError(
@@ -275,21 +332,64 @@ func apiTaskByIDHandler(
 
 func getTasks(
 	w http.ResponseWriter,
+	r *http.Request,
 ) {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	result := make(
-		[]Task,
-		0,
-		len(tasks),
+	rows, err := db.Query(
+		r.Context(),
+		`
+		SELECT id, title, completed
+		FROM tasks
+		ORDER BY created_at DESC
+		`,
 	)
 
-	for _, task := range tasks {
-		result = append(
-			result,
-			task,
+	if err != nil {
+		log.Println("getTasks query error:", err)
+
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"unable to fetch tasks",
 		)
+		return
+	}
+
+	defer rows.Close()
+
+	result := []Task{}
+
+	for rows.Next() {
+		var task Task
+
+		err := rows.Scan(
+			&task.ID,
+			&task.Title,
+			&task.Completed,
+		)
+
+		if err != nil {
+			log.Println("getTasks scan error:", err)
+
+			writeError(
+				w,
+				http.StatusInternalServerError,
+				"unable to read task",
+			)
+			return
+		}
+
+		result = append(result, task)
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Println("getTasks rows error:", err)
+
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"unable to fetch tasks",
+		)
+		return
 	}
 
 	writeJSON(
@@ -305,18 +405,41 @@ func getTasks(
 
 func getTask(
 	w http.ResponseWriter,
+	r *http.Request,
 	id string,
 ) {
-	mu.RLock()
-	defer mu.RUnlock()
+	var task Task
 
-	task, exists := tasks[id]
+	err := db.QueryRow(
+		r.Context(),
+		`
+		SELECT id, title, completed
+		FROM tasks
+		WHERE id = $1
+		`,
+		id,
+	).Scan(
+		&task.ID,
+		&task.Title,
+		&task.Completed,
+	)
 
-	if !exists {
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"task not found",
+			)
+			return
+		}
+
+		log.Println("getTask query error:", err)
+
 		writeError(
 			w,
-			http.StatusNotFound,
-			"task not found",
+			http.StatusInternalServerError,
+			"unable to fetch task",
 		)
 		return
 	}
@@ -370,9 +493,31 @@ func createTask(
 		Completed: false,
 	}
 
-	mu.Lock()
-	tasks[task.ID] = task
-	mu.Unlock()
+	_, err = db.Exec(
+		r.Context(),
+		`
+		INSERT INTO tasks (
+			id,
+			title,
+			completed
+		)
+		VALUES ($1, $2, $3)
+		`,
+		task.ID,
+		task.Title,
+		task.Completed,
+	)
+
+	if err != nil {
+		log.Println("createTask insert error:", err)
+
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"unable to create task",
+		)
+		return
+	}
 
 	writeJSON(
 		w,
@@ -418,12 +563,32 @@ func updateTask(
 		return
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
+	commandTag, err := db.Exec(
+		r.Context(),
+		`
+		UPDATE tasks
+		SET
+			title = $1,
+			completed = $2
+		WHERE id = $3
+		`,
+		request.Title,
+		request.Completed,
+		id,
+	)
 
-	task, exists := tasks[id]
+	if err != nil {
+		log.Println("updateTask query error:", err)
 
-	if !exists {
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"unable to update task",
+		)
+		return
+	}
+
+	if commandTag.RowsAffected() == 0 {
 		writeError(
 			w,
 			http.StatusNotFound,
@@ -432,10 +597,11 @@ func updateTask(
 		return
 	}
 
-	task.Title = request.Title
-	task.Completed = request.Completed
-
-	tasks[id] = task
+	task := Task{
+		ID:        id,
+		Title:     request.Title,
+		Completed: request.Completed,
+	}
 
 	writeJSON(
 		w,
@@ -450,14 +616,30 @@ func updateTask(
 
 func deleteTask(
 	w http.ResponseWriter,
+	r *http.Request,
 	id string,
 ) {
-	mu.Lock()
-	defer mu.Unlock()
+	commandTag, err := db.Exec(
+		r.Context(),
+		`
+		DELETE FROM tasks
+		WHERE id = $1
+		`,
+		id,
+	)
 
-	_, exists := tasks[id]
+	if err != nil {
+		log.Println("deleteTask query error:", err)
 
-	if !exists {
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"unable to delete task",
+		)
+		return
+	}
+
+	if commandTag.RowsAffected() == 0 {
 		writeError(
 			w,
 			http.StatusNotFound,
@@ -465,8 +647,6 @@ func deleteTask(
 		)
 		return
 	}
-
-	delete(tasks, id)
 
 	w.WriteHeader(
 		http.StatusNoContent,
