@@ -18,4 +18,4 @@ spec:
           image: task-frontend:v1
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 3000
+            - containerPort: 80

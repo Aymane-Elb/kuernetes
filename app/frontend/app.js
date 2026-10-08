@@ -1,4 +1,4 @@
-const API_URL = "http://localhost:8080";
+const API_URL = "";
 
 const taskForm = document.getElementById("task-form");
 const taskTitleInput = document.getElementById("task-title");
